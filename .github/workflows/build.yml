@@ -1,0 +1,135 @@
+name: Build Android APK & Release AAB
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK & Release AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Accept Android SDK licenses
+        run: |
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Prepare debug keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkeypair -noprompt \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Prepare release upload keystore
+        id: release_keystore
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
+          if [ -n "$UPLOAD_KEYSTORE_BASE64" ] && [ -n "$SECRET_STORE_PASSWORD" ] && [ -n "$SECRET_KEY_PASSWORD" ]; then
+            printf '%s' "$UPLOAD_KEYSTORE_BASE64" | tr -d '\n\r ' | base64 -d > "$KEYSTORE_FILE"
+            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$SECRET_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$SECRET_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "signing_mode=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GitHub Secrets (UPLOAD_KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD) are not set. Generating a temporary CI upload keystore for testing only; do NOT publish an AAB signed with this temporary key to Google Play."
+            TMP_PASS="ci_temp_upload_pass_1234"
+            keytool -genkeypair -noprompt \
+              -keystore "$KEYSTORE_FILE" \
+              -storetype JKS \
+              -storepass "$TMP_PASS" \
+              -alias upload \
+              -keypass "$TMP_PASS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=CI Build,OU=Android,O=BowlingStrike,C=US"
+            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$TMP_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$TMP_PASS" >> "$GITHUB_ENV"
+            echo "signing_mode=temporary" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Debug APK, Release APK, and Release AAB
+        run: gradle :app:assembleDebug :app:assembleRelease :app:bundleRelease --stacktrace
+
+      - name: Upload app-debug.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload app-release.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload app-release.aab
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+      - name: Write build summary
+        run: |
+          {
+            echo "### Bowling Strike Build Artifacts"
+            echo "- \`app-debug-apk\`: Debug APK (\`app/build/outputs/apk/debug/app-debug.apk\`)"
+            echo "- \`app-release-apk\`: Release APK (\`app/build/outputs/apk/release/app-release.apk\`)"
+            echo "- \`app-release-aab\`: Release App Bundle (\`app/build/outputs/bundle/release/app-release.aab\`)"
+            if [ "${{ steps.release_keystore.outputs.signing_mode }}" = "temporary" ]; then
+              echo ""
+              echo "> **Note:** Release artifacts were signed with a temporary CI keystore because \`UPLOAD_KEYSTORE_BASE64\`, \`STORE_PASSWORD\`, and \`KEY_PASSWORD\` secrets were not configured. Set those GitHub repository secrets before uploading to Google Play."
+            else
+              echo ""
+              echo "Release artifacts were signed with the configured repository upload keystore."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up keystores
+        if: always()
+        run: |
+          rm -f "${{ github.workspace }}/my-upload-key.jks" "${{ github.workspace }}/debug.keystore"

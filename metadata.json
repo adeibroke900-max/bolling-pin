@@ -1,0 +1,8 @@
+{
+  "name": "Remix Bowling Strike",
+  "description": "Complete 2D arcade bowling game with realistic ball and pin physics, 10-frame scoring, synthesized Web Audio effects, and touch or mouse controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
